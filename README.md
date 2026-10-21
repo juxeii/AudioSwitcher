@@ -84,10 +84,6 @@ The compiler built into Windows only understands C# 5, so the source is written 
 
 A script that compiles and launches an `.exe` can look suspicious to antivirus software or SmartScreen, so here is exactly what it does: it reads its own text, writes a `.cs` file, a `.ico` file and the compiled `.exe` to `%APPDATA%\AudioSwitcher\`, creates a Start Menu shortcut, and starts the app. It makes no network connections and needs no administrator rights. The whole source is in the file, so you can read it before running it.
 
-## Contributing
-
-Issues and pull requests are welcome. To work on the code, edit the C# section of the `.bat` (everything after `::CSHARP_BEGIN`) and run the file again; it rebuilds automatically. Keep the source C# 5 compatible, ASCII-only, and keep Windows (CRLF) line endings.
-
 ## Credits
 
 Completely vibe coded with Sonnet 5.5 High in 10 minutes!
