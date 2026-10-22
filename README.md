@@ -74,11 +74,9 @@ The compiler built into Windows only understands C# 5, so the source is written 
 
 ## Known limitations
 
-- **Playback devices only.** Recording devices are not supported.
 - **Undocumented API.** Setting the default device relies on `IPolicyConfig`, which Microsoft does not officially document. It is used by many audio tools and has been stable for years, but a future Windows update could change it.
 - **Device matching is name-based as a fallback.** If an update changes a device's name, or you have two identical devices, the app can't re-link it automatically and leaves your selection alone instead of guessing.
 - **The popup can't draw over exclusive-fullscreen apps** (some games). Borderless and maximized windows are fine.
-- **Lightly tested.** It was developed and tested on a small number of Windows machines. Bug reports are welcome.
 
 ## Security notes
 
