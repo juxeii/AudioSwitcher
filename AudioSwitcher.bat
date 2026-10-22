@@ -136,11 +136,17 @@ namespace AudioSwitcher
         public int Modifiers = 3;                 // Ctrl + Alt
         public int Key = (int)Keys.S;
         public bool ShowNotifications = true;
+        public bool SwitchMic = true;             // switch the paired microphone together with the output
         public List<SavedDevice> Devices = new List<SavedDevice>();
 
         public bool HasId(string id)
         {
             return Devices.Any(d => d.Id == id);
+        }
+
+        public SavedDevice Find(string id)
+        {
+            return Devices.FirstOrDefault(d => d.Id == id);
         }
 
         // Matches the saved devices against the devices that are currently active.
@@ -206,15 +212,20 @@ namespace AudioSwitcher
                     if (k == "Modifiers" && int.TryParse(v, out n)) cfg.Modifiers = n;
                     else if (k == "Key" && int.TryParse(v, out n)) cfg.Key = n;
                     else if (k == "ShowNotifications") cfg.ShowNotifications = (v != "0");
+                    else if (k == "SwitchMic") cfg.SwitchMic = (v != "0");
                     else if (k == "Device" && v.Length > 0)
                     {
-                        // format: id <TAB> fingerprint <TAB> name   (older files: just the id)
+                        // format: id <TAB> fingerprint <TAB> name <TAB> nomic(0/1)   (older files: fewer fields)
                         string[] parts = v.Split('\t');
                         string id = parts[0].Trim();
                         if (id.Length > 0 && !cfg.HasId(id))
-                            cfg.Devices.Add(new SavedDevice(id,
+                        {
+                            var sd = new SavedDevice(id,
                                 parts.Length > 1 ? parts[1] : "",
-                                parts.Length > 2 ? parts[2] : ""));
+                                parts.Length > 2 ? parts[2] : "");
+                            sd.NoMic = parts.Length > 3 && parts[3].Trim() == "1";
+                            cfg.Devices.Add(sd);
+                        }
                     }
                 }
             }
@@ -231,7 +242,9 @@ namespace AudioSwitcher
                 lines.Add("Modifiers=" + Modifiers);
                 lines.Add("Key=" + Key);
                 lines.Add("ShowNotifications=" + (ShowNotifications ? "1" : "0"));
-                foreach (var d in Devices) lines.Add("Device=" + d.Id + "\t" + d.Key + "\t" + d.Name);
+                lines.Add("SwitchMic=" + (SwitchMic ? "1" : "0"));
+                foreach (var d in Devices)
+                    lines.Add("Device=" + d.Id + "\t" + d.Key + "\t" + d.Name + "\t" + (d.NoMic ? "1" : "0"));
                 File.WriteAllLines(ConfigPath, lines.ToArray());
             }
             catch { /* ignore */ }
@@ -243,6 +256,7 @@ namespace AudioSwitcher
         public string Id;      // Windows endpoint ID (can change after driver updates etc.)
         public string Key;     // fingerprint built from the device's names (survives ID changes)
         public string Name;    // display name
+        public bool NoMic;     // true = do not switch the microphone together with this output
 
         public SavedDevice(string id, string key, string name)
         {
@@ -320,8 +334,29 @@ namespace AudioSwitcher
                 int idx = chosen.FindIndex(d => d.Id == current);
                 AudioDevice next = chosen[(idx + 1) % chosen.Count];   // idx == -1 -> first device
 
-                Audio.SetDefaultRenderDevice(next.Id);
-                Notify("Audio output", next.Name, false);
+                Audio.SetDefaultDevice(next.Id);
+
+                // Also switch the microphone that belongs to the same physical device (e.g. a headset's mic)
+                string micLine = "";
+                if (_cfg.SwitchMic)
+                {
+                    SavedDevice saved = _cfg.Find(next.Id);
+                    if (saved == null || !saved.NoMic)
+                    {
+                        try
+                        {
+                            AudioDevice mic = Audio.FindMicFor(next, Audio.GetActiveCaptureDevices());
+                            if (mic != null)
+                            {
+                                Audio.SetDefaultDevice(mic.Id);
+                                micLine = "Mic: " + mic.Name;
+                            }
+                        }
+                        catch { micLine = "Mic: could not be switched"; }
+                    }
+                }
+
+                Notify("Audio output", next.Name, micLine, false);
             }
             catch (Exception ex)
             {
@@ -422,6 +457,35 @@ namespace AudioSwitcher
                     item.Click += (s, e) => { _cfg.Devices.Remove(sv); _cfg.Save(); };
                     _menu.Items.Add(item);
                 }
+
+                // Which microphone follows which ticked output (only outputs that have a paired mic are listed)
+                if (_cfg.SwitchMic)
+                {
+                    var mics = Audio.GetActiveCaptureDevices();
+                    var pairItems = new List<ToolStripMenuItem>();
+                    foreach (var dev in active)
+                    {
+                        SavedDevice sd = _cfg.Find(dev.Id);
+                        if (sd == null) continue;
+                        AudioDevice mic = Audio.FindMicFor(dev, mics);
+                        if (mic == null) continue;
+
+                        var pairSaved = sd;
+                        var pair = new ToolStripMenuItem((dev.Name + "  ->  " + mic.Name).Replace("&", "&&"));
+                        pair.Checked = !pairSaved.NoMic;
+                        pair.Click += (s, e) => { pairSaved.NoMic = !pairSaved.NoMic; _cfg.Save(); };
+                        pairItems.Add(pair);
+                    }
+
+                    if (pairItems.Count > 0)
+                    {
+                        _menu.Items.Add(new ToolStripSeparator());
+                        var pairHeader = new ToolStripMenuItem("Microphone follows output:");
+                        pairHeader.Enabled = false;
+                        _menu.Items.Add(pairHeader);
+                        foreach (var pi in pairItems) _menu.Items.Add(pi);
+                    }
+                }
             }
             catch (Exception ex)
             {
@@ -444,6 +508,11 @@ namespace AudioSwitcher
             notif.Checked = _cfg.ShowNotifications;
             notif.Click += (s, e) => { _cfg.ShowNotifications = !_cfg.ShowNotifications; _cfg.Save(); };
             _menu.Items.Add(notif);
+
+            var micToggle = new ToolStripMenuItem("Also switch microphone");
+            micToggle.Checked = _cfg.SwitchMic;
+            micToggle.Click += (s, e) => { _cfg.SwitchMic = !_cfg.SwitchMic; _cfg.Save(); };
+            _menu.Items.Add(micToggle);
 
             var auto = new ToolStripMenuItem("Start with Windows");
             auto.Checked = GetAutostart();
@@ -472,8 +541,13 @@ namespace AudioSwitcher
         // Shows a small popup on screen (does not depend on Windows notification settings).
         void Notify(string title, string text, bool force)
         {
+            Notify(title, text, "", force);
+        }
+
+        void Notify(string title, string text, string sub, bool force)
+        {
             if (force || _cfg.ShowNotifications)
-                _osd.ShowMessage(title, text, force ? 4000 : 1500);
+                _osd.ShowMessage(title, text, sub, force ? 4000 : 1500);
         }
 
         static bool GetAutostart()
@@ -589,6 +663,7 @@ namespace AudioSwitcher
 
         readonly Label _title = new Label();
         readonly Label _text = new Label();
+        readonly Label _sub = new Label();
         readonly System.Windows.Forms.Timer _timer = new System.Windows.Forms.Timer();
 
         public OsdForm()
@@ -610,8 +685,14 @@ namespace AudioSwitcher
             _text.ForeColor = Color.White;
             _text.Font = new Font("Segoe UI Semibold", 13f);
 
+            _sub.AutoSize = false;
+            _sub.UseMnemonic = false;
+            _sub.ForeColor = Color.FromArgb(190, 190, 190);
+            _sub.Font = new Font("Segoe UI", 10f);
+
             Controls.Add(_title);
             Controls.Add(_text);
+            Controls.Add(_sub);
 
             _timer.Tick += (s, e) => { _timer.Stop(); Hide(); };
         }
@@ -631,20 +712,25 @@ namespace AudioSwitcher
             }
         }
 
-        public void ShowMessage(string title, string text, int milliseconds)
+        public void ShowMessage(string title, string text, string sub, int milliseconds)
         {
             _timer.Stop();
             _title.Text = title;
             _text.Text = text;
+            _sub.Text = sub ?? "";
+            bool hasSub = _sub.Text.Length > 0;
+            _sub.Visible = hasSub;
 
             const int pad = 18;
             Size ts = _title.GetPreferredSize(new Size(460, 0));
             Size xs = _text.GetPreferredSize(new Size(460, 0));
-            int w = Math.Max(ts.Width, xs.Width) + 2 * pad;
-            int h = ts.Height + xs.Height + 2 * pad + 4;
+            Size ss = hasSub ? _sub.GetPreferredSize(new Size(460, 0)) : Size.Empty;
+            int w = Math.Max(Math.Max(ts.Width, xs.Width), ss.Width) + 2 * pad;
+            int h = ts.Height + xs.Height + (hasSub ? ss.Height + 4 : 0) + 2 * pad + 4;
 
             _title.SetBounds(pad, pad, w - 2 * pad, ts.Height);
             _text.SetBounds(pad, pad + ts.Height + 4, w - 2 * pad, xs.Height);
+            if (hasSub) _sub.SetBounds(pad, pad + ts.Height + 4 + xs.Height + 4, w - 2 * pad, ss.Height);
             Size = new Size(w, h);
 
             using (GraphicsPath path = RoundedRect(new Rectangle(0, 0, w, h), 14))
@@ -779,15 +865,20 @@ namespace AudioSwitcher
         public readonly string Id;
         public readonly string Name;
         public readonly string Key;     // fingerprint: description // interface name (USB port prefix removed)
-        public AudioDevice(string id, string name, string key) { Id = id; Name = name; Key = key; }
+        public readonly string Container;  // physical-device ID shared by a headset's speakers and microphone ("" = none/generic)
+        public AudioDevice(string id, string name, string key, string container)
+        {
+            Id = id; Name = name; Key = key; Container = container ?? "";
+        }
     }
 
     static class Audio
     {
-        const int eRender = 0;
+        const int eRender = 0, eCapture = 1;
         const int eConsole = 0, eMultimedia = 1, eCommunications = 2;
         const uint DEVICE_STATE_ACTIVE = 0x1;
         const ushort VT_LPWSTR = 31;
+        const ushort VT_CLSID = 72;
 
         // Property sets: PKEY_Device_FriendlyName (14) / DeviceDesc (2) share this GUID
         static readonly Guid DevicePropsFmt = new Guid("a45c254e-df1c-4efd-8020-67d146a850e0");
@@ -799,11 +890,21 @@ namespace AudioSwitcher
 
         public static List<AudioDevice> GetActiveRenderDevices()
         {
+            return GetActiveDevices(eRender);
+        }
+
+        public static List<AudioDevice> GetActiveCaptureDevices()
+        {
+            return GetActiveDevices(eCapture);
+        }
+
+        static List<AudioDevice> GetActiveDevices(int dataFlow)
+        {
             var result = new List<AudioDevice>();
             var enumerator = (IMMDeviceEnumerator)new MMDeviceEnumeratorComObject();
 
             IMMDeviceCollection collection;
-            enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, out collection);
+            enumerator.EnumAudioEndpoints(dataFlow, DEVICE_STATE_ACTIVE, out collection);
 
             uint count;
             collection.GetCount(out count);
@@ -833,12 +934,49 @@ namespace AudioSwitcher
             catch { return null; }
         }
 
-        public static void SetDefaultRenderDevice(string deviceId)
+        // Works for playback and recording endpoints alike.
+        public static void SetDefaultDevice(string deviceId)
         {
             var policy = (IPolicyConfig)new PolicyConfigClient();
             int[] roles = new int[] { eConsole, eMultimedia, eCommunications };
             foreach (int role in roles)
                 Marshal.ThrowExceptionForHR(policy.SetDefaultEndpoint(deviceId, role));
+        }
+
+        // PKEY_Device_ContainerId: identifies the physical device an endpoint belongs to.
+        static readonly Guid ContainerFmt = new Guid("8c7ed206-3f8a-4827-b3ab-ae9e1faefc6c");
+        // Onboard / non-removable audio shares this "generic" container, so it says nothing about pairing.
+        static readonly Guid GenericContainer = new Guid("00000000-0000-0000-ffff-ffffffffffff");
+
+        static string ReadContainer(IPropertyStore store)
+        {
+            try
+            {
+                var key = new PropertyKey();
+                key.fmtid = ContainerFmt;
+                key.pid = 2;
+                PropVariant pv;
+                store.GetValue(ref key, out pv);
+                string result = "";
+                if (pv.vt == VT_CLSID && pv.p != IntPtr.Zero)
+                {
+                    Guid g = (Guid)Marshal.PtrToStructure(pv.p, typeof(Guid));
+                    if (g != Guid.Empty && g != GenericContainer) result = g.ToString("D");
+                }
+                PropVariantClear(ref pv);
+                return result;
+            }
+            catch { return ""; }
+        }
+
+        // A microphone belongs to an output when both are endpoints of the same physical device
+        // (same non-generic container ID), e.g. a USB or Bluetooth headset. If there is no such
+        // microphone, or more than one, nothing is paired and the microphone is left alone.
+        public static AudioDevice FindMicFor(AudioDevice output, List<AudioDevice> mics)
+        {
+            if (output.Container.Length == 0) return null;
+            var matches = mics.Where(m => m.Container == output.Container).ToList();
+            return matches.Count == 1 ? matches[0] : null;
         }
 
         static string ReadString(IPropertyStore store, Guid fmtid, uint pid)
@@ -865,11 +1003,12 @@ namespace AudioSwitcher
 
         static AudioDevice ReadDevice(IMMDevice dev, string id)
         {
-            string name = "", desc = "", iface = "";
+            string name = "", desc = "", iface = "", container = "";
             try
             {
                 IPropertyStore store;
                 dev.OpenPropertyStore(0 /* STGM_READ */, out store);
+                container = ReadContainer(store);
                 name = ReadString(store, DevicePropsFmt, 14);
                 desc = ReadString(store, DevicePropsFmt, 2);
                 iface = StripPrefix(ReadString(store, InterfacePropsFmt, 2));
@@ -878,7 +1017,7 @@ namespace AudioSwitcher
 
             if (name.Length == 0) name = "Unknown device";
             string key = (desc.Length > 0 && iface.Length > 0) ? desc + " // " + iface : StripPrefix(name);
-            return new AudioDevice(id, name, key);
+            return new AudioDevice(id, name, key, container);
         }
     }
 
